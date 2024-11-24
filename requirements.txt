@@ -1,0 +1,7 @@
+python-dotenv
+requests
+websockets
+pydantic
+pandas
+matplotlib
+mplfinance

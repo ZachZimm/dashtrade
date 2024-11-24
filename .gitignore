@@ -1,0 +1,6 @@
+*USD.png
+*._*
+*.db
+venv
+__pycache__
+.env
