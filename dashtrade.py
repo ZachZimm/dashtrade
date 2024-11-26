@@ -147,7 +147,10 @@ class Bar(BaseModel):
 def plot_ohlc_charts():
     while not shutodwn_event.is_set():
         with data_lock:
-            local_data = {symbol: data[symbol][:] for symbol in data}
+            _data_len = len(data)
+            data_len = 1024
+            data_len = min(data_len, _data_len)
+            local_data = {symbol: data[symbol][-data_len:] for symbol in data}
         for symbol, bars in local_data.items():
             if not bars:
                 continue
@@ -163,7 +166,7 @@ def plot_ohlc_charts():
             df.set_index('Date', inplace=True)
             # Plot the OHLC chart
             mpf.plot(df, type='candle', style='charles', title=symbol,
-                     savefig=f'{symbol.replace("/", "_")}.png')
+                     savefig=f'charts/{symbol.replace("/", "_")}.png')
             print(f"Plotted {symbol} chart")
         time.sleep(150)  # Sleep for 2.5 minutes
     
