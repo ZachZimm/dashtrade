@@ -265,6 +265,109 @@ def create_threads():
 
     main()
 
+def load_data_from_db(ticker, start_timestamp) -> list:
+    conn = sqlite3.connect('trades.db')  # Connect to the SQLite database
+    cursor = conn.cursor()
+    
+    # Format the start_timestamp for SQL query
+    formatted_start_time = start_timestamp.isoformat()
+
+    # Query to fetch data starting from the specified timestamp
+    query = f"""
+    SELECT symbol, side, qty, price, ord_type, trade_id, timestamp 
+    FROM trades 
+    WHERE symbol='{ticker}' AND timestamp >= '{formatted_start_time}'
+    """
+    
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    
+    # Convert each row to a dictionary
+    data_points = []
+    for row in rows:
+        data_point = {
+            'symbol': row[0],
+            'side': row[1],
+            'qty': row[2],
+            'price': row[3],
+            'ord_type': row[4],
+            'trade_id': row[5],
+            'timestamp': datetime.datetime.strptime(row[6], "%Y-%m-%dT%H:%M:%S.%fZ")
+        }
+        data_points.append(data_point)
+    
+    conn.close()
+    return data_points
+
+
+def create_dollar_bars(data, bar_size) -> pd.DataFrame:
+    dollar_bars = []
+    
+    # Sort the data by timestamp
+    sorted_data = sorted(data, key=lambda x: x['timestamp'])
+
+    for trade in sorted_data:
+        symbol = trade['symbol']
+        price = trade['price']
+        volume = trade['qty']
+
+        if not dollar_bars or dollar_bars[-1]['dollar_volume'] >= bar_size:
+            # Start a new bar
+            new_bar = {
+                'start_time': trade['timestamp'],
+                'open': price,
+                'high': price,
+                'low': price,
+                'close': price,
+                'volume': volume,
+                'dollar_volume': price * volume
+            }
+            dollar_bars.append(new_bar)
+        else:
+            # Update the current bar
+            last_bar = dollar_bars[-1]
+            last_bar['close'] = price
+            last_bar['high'] = max(last_bar['high'], price)
+            last_bar['low'] = min(last_bar['low'], price)
+
+            if last_bar['dollar_volume'] + price * volume <= bar_size:
+                last_bar['volume'] += volume
+                last_bar['dollar_volume'] += price * volume
+            else: # Overflow the current bar
+                needed_volume = (bar_size - last_bar['dollar_volume']) / price
+                last_bar['volume'] += needed_volume
+                last_bar['dollar_volume'] = bar_size
+
+                num_new_bars = (price * volume - needed_volume) // bar_size
+                excess_volume = (price * volume - needed_volume) % bar_size
+                for _ in range(num_new_bars):
+                    new_bar = {
+                        'start_time': trade['timestamp'],
+                        'open': price,
+                        'high': price,
+                        'low': price,
+                        'close': price,
+                        'volume': bar_size / price,
+                        'dollar_volume': bar_size
+                    }
+                    dollar_bars.append(new_bar)
+
+                if excess_volume > 0:
+                    dollar_bars[-1]['volume'] += excess_volume / price
+                    dollar_bars[-1]['dollar_volume'] += excess_volume
+                
+            return dollar_bars
+            
+
+    # Convert list of dictionaries to DataFrame
+    df = pd.DataFrame(dollar_bars)
+    df.set_index('start_time', inplace=True)
+
+    return df
+
 
 if __name__ == "__main__":
-    create_threads()
+    if sys.argv[1] == "record":
+        create_threads()
+    else:
+        create_threads()
