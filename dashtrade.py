@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import sys
 import time
 import json
@@ -19,7 +20,7 @@ import mplfinance as mpf
 
 # Load environment variables
 load_dotenv()
-dollar_bar_size = 100000
+ws_token = None
 
 shutodwn_event = threading.Event()
 
@@ -44,7 +45,6 @@ def read_balances(data):
 
     return total_balance
 
-ws_token = get_token()
 
 subscribe_data = {
     "method": "subscribe",
@@ -84,114 +84,6 @@ async def connect_auth():
                 print(e)
                 break
 
-
-class Bar(BaseModel):
-    start_time: datetime.datetime
-    end_time: Optional[datetime.datetime] = None
-    time_elapsed: float
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    dollar_volume: float
-    bar_size: int
-
-    def __init__(self, start_time, open_price, volume=0, bar_size=dollar_bar_size):
-        dollar_volume = volume * open_price
-        super().__init__(
-            start_time=start_time,
-            end_time=None,
-            time_elapsed=0,
-            open=open_price,
-            high=open_price,
-            low=open_price,
-            close=open_price,
-            volume=volume,
-            dollar_volume=dollar_volume,
-            bar_size=bar_size
-        )
-        # print(f"Creating a new bar of ${bar_size}")
-
-
-    def update(self, price, volume):
-        self.close = price
-        self.time_elapsed = (datetime.datetime.now() - self.start_time).total_seconds()
-        dollar_vol = volume * price
-        remaining_dollar_volume = self.bar_size - self.dollar_volume
-
-        if dollar_vol <= remaining_dollar_volume:
-            # Add entire trade to the current bar
-            self.dollar_volume += dollar_vol
-            self.volume += volume
-            if price > self.high:
-                self.high = price
-            if price < self.low:
-                self.low = price
-            return 0  # No excess volume
-        else:
-            # Calculate the portion of the trade that fits in the current bar
-            needed_volume = remaining_dollar_volume / price
-            self.dollar_volume = self.bar_size
-            self.volume += needed_volume
-            if price > self.high:
-                self.high = price
-            if price < self.low:
-                self.low = price
-            self.end_time = datetime.datetime.now()
-
-            # Calculate excess volume to pass to the next bar
-            excess_volume = volume - needed_volume
-            return excess_volume
-
-def plot_ohlc_charts():
-    while not shutodwn_event.is_set():
-        with data_lock:
-            _data_len = len(data)
-            data_len = 1024
-            data_len = min(data_len, _data_len)
-            local_data = {symbol: data[symbol][-data_len:] for symbol in data}
-        for symbol, bars in local_data.items():
-            if not bars:
-                continue
-            # Create DataFrame from bars
-            df = pd.DataFrame([{
-                'Date': bar.start_time,
-                'Open': bar.open,
-                'High': bar.high,
-                'Low': bar.low,
-                'Close': bar.close,
-                'Volume': bar.volume
-            } for bar in bars])
-            df.set_index('Date', inplace=True)
-            # Plot the OHLC chart
-            mpf.plot(df, type='candle', style='charles', title=symbol,
-                     savefig=f'charts/{symbol.replace("/", "_")}.png')
-            print(f"Plotted {symbol} chart")
-        time.sleep(150)  # Sleep for 2.5 minutes
-    
-data = {}
-data_lock = threading.Lock()
-
-def handle_data(new_trade):
-    global data
-    symbol = new_trade['symbol']
-    price = new_trade['price']
-    volume = new_trade['volume']
-    with data_lock:
-        if symbol not in data:
-            data[symbol] = []
-
-        excess_volume = volume
-        while excess_volume > 0:
-            if len(data[symbol]) == 0 or data[symbol][-1].dollar_volume >= data[symbol][-1].bar_size:
-                # Start a new bar
-                data[symbol].append(Bar(datetime.datetime.now(), price))
-            bar = data[symbol][-1]
-            excess_volume = bar.update(price, excess_volume)
-
-
-
 async def connect():
     # Setup database connection and create the trades table
     conn = sqlite3.connect('trades.db')  # Connect to the SQLite database
@@ -229,7 +121,6 @@ async def connect():
                             timestamp = trade['timestamp']
                             # Convert timestamp to datetime object if needed
                             timestamp_dt = datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
-                            # print(f"{timestamp_dt}:\t{side} {round(qty,3)} {symbol} @ {price} ")
 
                             # Insert the trade data into the database
                             cursor.execute('''INSERT INTO trades (symbol, side, qty, price, ord_type, trade_id, timestamp)
@@ -237,8 +128,6 @@ async def connect():
                                            (symbol, side, qty, price, ord_type, trade_id, timestamp))
                             conn.commit()
 
-                            trade['volume'] = trade['qty']
-                            handle_data(trade)
 
                 else:
                     print(response)
@@ -247,6 +136,7 @@ async def connect():
                 break
 
 def main():
+    ws_token = get_token()
     try:
         while not shutodwn_event.is_set():
             shutodwn_event.wait(1)
@@ -258,10 +148,8 @@ def create_threads():
     signal.signal(signal.SIGINT, signal_handler)
     thread1 = threading.Thread(target=lambda: asyncio.run(connect_auth()), daemon=True)
     thread2 = threading.Thread(target=lambda: asyncio.run(connect()), daemon=True)
-    thread3 = threading.Thread(target=plot_ohlc_charts, daemon=True)
     thread1.start()
     thread2.start()
-    thread3.start()
 
     main()
 
@@ -338,7 +226,10 @@ def create_dollar_bars(data, bar_size) -> pd.DataFrame:
                 last_bar['volume'] += needed_volume
                 last_bar['dollar_volume'] = bar_size
 
-                num_new_bars = (price * volume - needed_volume) // bar_size
+                num_new_bars = (price * volume - needed_volume) / bar_size
+                num_new_bars = int(np.ceil(num_new_bars))
+                print(f"Price: {price}, Volume: {volume}")
+                print(f"Overflow: {num_new_bars}")
                 excess_volume = (price * volume - needed_volume) % bar_size
                 for _ in range(num_new_bars):
                     new_bar = {
@@ -355,9 +246,6 @@ def create_dollar_bars(data, bar_size) -> pd.DataFrame:
                 if excess_volume > 0:
                     dollar_bars[-1]['volume'] += excess_volume / price
                     dollar_bars[-1]['dollar_volume'] += excess_volume
-                
-            return dollar_bars
-            
 
     # Convert list of dictionaries to DataFrame
     df = pd.DataFrame(dollar_bars)
@@ -365,9 +253,24 @@ def create_dollar_bars(data, bar_size) -> pd.DataFrame:
 
     return df
 
+def read_data():
+    print("Reading data from the database...")
+    # Load data from the database
+    symbol = 'BTC/USD'
+    bar_size = 500000
+    data = load_data_from_db('BTC/USD', datetime.datetime(2024, 11, 24))
+    # Create dollar bars
+    dollar_bars = create_dollar_bars(data, bar_size)
+    print(dollar_bars.head())
+    print(dollar_bars.tail())
+
+    # Plot the OHLC chart
+    mpf.plot(dollar_bars, type='candle', style='charles', title='charts/' + symbol.replace("/", "_") + ".png")
+    plt.show()
+
 
 if __name__ == "__main__":
     if sys.argv[1] == "record":
         create_threads()
     else:
-        create_threads()
+        read_data()

@@ -3,5 +3,6 @@ requests
 websockets
 pydantic
 pandas
+numpy
 matplotlib
 mplfinance
