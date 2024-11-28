@@ -136,7 +136,6 @@ async def connect():
                 break
 
 def main():
-    ws_token = get_token()
     try:
         while not shutodwn_event.is_set():
             shutodwn_event.wait(1)
@@ -145,11 +144,19 @@ def main():
         sys.exit(0)
 
 def create_threads():
+    global ws_token
+    ws_token = get_token()
     signal.signal(signal.SIGINT, signal_handler)
     thread1 = threading.Thread(target=lambda: asyncio.run(connect_auth()), daemon=True)
     thread2 = threading.Thread(target=lambda: asyncio.run(connect()), daemon=True)
     thread1.start()
-    thread2.start()
+    # if thread2 ends, restart it
+    while True:
+        if not thread2.is_alive():
+            thread2 = threading.Thread(target=lambda: asyncio.run(connect()), daemon=True)
+            thread2.start()
+            print("Starting thread2")
+        time.sleep(1)
 
     main()
 
@@ -221,19 +228,20 @@ def create_dollar_bars(data, bar_size) -> pd.DataFrame:
             if last_bar['dollar_volume'] + price * volume <= bar_size:
                 last_bar['volume'] += volume
                 last_bar['dollar_volume'] += price * volume
+                last_bar['end_time'] = trade['timestamp']
             else: # Overflow the current bar
                 needed_volume = (bar_size - last_bar['dollar_volume']) / price
                 last_bar['volume'] += needed_volume
                 last_bar['dollar_volume'] = bar_size
+                last_bar['end_time'] = trade['timestamp']
 
                 num_new_bars = (price * volume - needed_volume) / bar_size
                 num_new_bars = int(np.ceil(num_new_bars))
-                print(f"Price: {price}, Volume: {volume}")
-                print(f"Overflow: {num_new_bars}")
                 excess_volume = (price * volume - needed_volume) % bar_size
                 for _ in range(num_new_bars):
                     new_bar = {
                         'start_time': trade['timestamp'],
+                        'end_time': trade['timestamp'],
                         'open': price,
                         'high': price,
                         'low': price,
@@ -253,12 +261,12 @@ def create_dollar_bars(data, bar_size) -> pd.DataFrame:
 
     return df
 
-def read_data():
+def read_data(symbol, start_timestamp):
     print("Reading data from the database...")
     # Load data from the database
-    symbol = 'BTC/USD'
     bar_size = 500000
-    data = load_data_from_db('BTC/USD', datetime.datetime(2024, 11, 24))
+    bar_size = 20000
+    data = load_data_from_db(symbol, start_timestamp)
     # Create dollar bars
     dollar_bars = create_dollar_bars(data, bar_size)
     print(dollar_bars.head())
@@ -273,4 +281,4 @@ if __name__ == "__main__":
     if sys.argv[1] == "record":
         create_threads()
     else:
-        read_data()
+        read_data('XRP/USD', datetime.datetime(2024, 11, 24))
