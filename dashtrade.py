@@ -1,35 +1,29 @@
 import os
-import numpy as np
 import sys
 import time
 import json
 import asyncio
 import signal
-import threading
 import websockets
 from websockets.exceptions import ConnectionClosedError
-from typing import Optional
-from pydantic import BaseModel
-import datetime
 from dotenv import load_dotenv
 from rest_websocket_token import get_token
 import sqlite3
 import pandas as pd
 import matplotlib.pyplot as plt
 import mplfinance as mpf
+import datetime
 
 # Load environment variables
 load_dotenv()
 ws_token = None
 
-shutodwn_event = threading.Event()
+shutodwn_event = asyncio.Event()
 
 def signal_handler(sig, frame):
     print("\nShutting down...")
     shutodwn_event.set()
     sys.exit(0)
-
-
 
 def read_balances(data):
     total_balance = 0
@@ -44,7 +38,6 @@ def read_balances(data):
             total_balance += _bal
 
     return total_balance
-
 
 subscribe_data = {
     "method": "subscribe",
@@ -65,100 +58,87 @@ balance_subscribe_data = {
 # Create a websocket connection
 uri = "wss://ws.kraken.com/v2"
 auth_uri = "wss://ws-auth.kraken.com/v2"
+
 async def connect_auth():
-    async with websockets.connect(auth_uri) as websocket:
-        # await websocket.send(ws_token)
-        # await websocket.send(json.dumps(subscribe_data))
-        await websocket.send(json.dumps(balance_subscribe_data))
-        while not shutodwn_event.is_set():
-            try:
-                response = await websocket.recv()
-                response = json.loads(response)
-                if 'channel' in response.keys() and response['channel'] == "heartbeat":
-                    continue
-                if 'channel' in response.keys() and response['channel'] == "balances":
-                    # print(response['data'])
-                    print(f"Total Balance: {read_balances(response['data'])}")
-                # print(response)
-            except ConnectionClosedError as e:
-                print(e)
-                break
+    global ws_token
+    while not shutodwn_event.is_set():
+        try:
+            async with websockets.connect(auth_uri) as websocket:
+                await websocket.send(json.dumps(balance_subscribe_data))
+                while not shutodwn_event.is_set():
+                    try:
+                        response = await websocket.recv()
+                        response = json.loads(response)
+                        if 'channel' in response and response['channel'] == "heartbeat":
+                            continue
+                        if 'channel' in response and response['channel'] == "balances":
+                            print(f"Total Balance: {read_balances(response['data'])}")
+                    except ConnectionClosedError as e:
+                        print(f"Auth ConnectionClosedError: {e}")
+                        break
+        except Exception as e:
+            print(f"Auth Connection Exception: {e}")
+            await asyncio.sleep(1)  # Wait before reconnecting
 
 async def connect():
-    # Setup database connection and create the trades table
-    conn = sqlite3.connect('trades.db')  # Connect to the SQLite database
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS trades (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        symbol TEXT,
-                        side TEXT,
-                        qty REAL,
-                        price REAL,
-                        ord_type TEXT,
-                        trade_id INTEGER,
-                        timestamp TEXT
-                    )''')
-    conn.commit()
+    while not shutodwn_event.is_set():
+        try:
+            # Setup database connection and create the trades table
+            with sqlite3.connect('trades.db') as conn:  # Use context manager to ensure closure
+                cursor = conn.cursor()
+                cursor.execute('''CREATE TABLE IF NOT EXISTS trades (
+                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                    symbol TEXT,
+                                    side TEXT,
+                                    qty REAL,
+                                    price REAL,
+                                    ord_type TEXT,
+                                    trade_id INTEGER,
+                                    timestamp TEXT
+                                )''')
+                conn.commit()
 
-    async with websockets.connect(uri) as websocket:
-        await websocket.send(json.dumps(subscribe_data))
-        while not shutodwn_event.is_set():
-            try:
-                response = await websocket.recv()
-                response = json.loads(response)
-                if 'channel' in response.keys() and response['channel'] == "heartbeat":
-                    continue
-                if 'channel' in response.keys() and response['channel'] == "trade":
-                    if 'data' in response.keys():
-                        for trade in response['data']:
-                            # Extract fields from the trade data
-                            symbol = trade['symbol']
-                            side = trade['side']
-                            qty = trade['qty']
-                            price = trade['price']
-                            ord_type = trade['ord_type']
-                            trade_id = trade['trade_id']
-                            timestamp = trade['timestamp']
-                            # Convert timestamp to datetime object if needed
-                            timestamp_dt = datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+                async with websockets.connect(uri) as websocket:
+                    await websocket.send(json.dumps(subscribe_data))
+                    while not shutodwn_event.is_set():
+                        try:
+                            response = await websocket.recv()
+                            response = json.loads(response)
+                            if 'channel' in response and response['channel'] == "heartbeat":
+                                continue
+                            if 'channel' in response and response['channel'] == "trade":
+                                if 'data' in response:
+                                    for trade in response['data']:
+                                        # Extract fields from the trade data
+                                        symbol = trade['symbol']
+                                        side = trade['side']
+                                        qty = trade['qty']
+                                        price = trade['price']
+                                        ord_type = trade['ord_type']
+                                        trade_id = trade['trade_id']
+                                        timestamp = trade['timestamp']
+                                        # Insert the trade data into the database
+                                        cursor.execute('''INSERT INTO trades (symbol, side, qty, price, ord_type, trade_id, timestamp)
+                                                          VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                                                       (symbol, side, qty, price, ord_type, trade_id, timestamp))
+                                        conn.commit()
+                            else:
+                                print(response)
+                        except ConnectionClosedError as e:
+                            print(f"Trade ConnectionClosedError: {e}")
+                            break
+        except Exception as e:
+            print(f"Trade Connection Exception: {e}")
+            await asyncio.sleep(1)  # Wait before reconnecting
 
-                            # Insert the trade data into the database
-                            cursor.execute('''INSERT INTO trades (symbol, side, qty, price, ord_type, trade_id, timestamp)
-                                              VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                                           (symbol, side, qty, price, ord_type, trade_id, timestamp))
-                            conn.commit()
-
-
-                else:
-                    print(response)
-            except ConnectionClosedError as e:
-                print(e)
-                break
-
-def main():
-    try:
-        while not shutodwn_event.is_set():
-            shutodwn_event.wait(1)
-    except KeyboardInterrupt:
-        shutodwn_event.set()
-        sys.exit(0)
-
-def create_threads():
+async def main():
     global ws_token
     ws_token = get_token()
     signal.signal(signal.SIGINT, signal_handler)
-    thread1 = threading.Thread(target=lambda: asyncio.run(connect_auth()), daemon=True)
-    thread2 = threading.Thread(target=lambda: asyncio.run(connect()), daemon=True)
-    thread1.start()
-    # if thread2 ends, restart it
-    while True:
-        if not thread2.is_alive():
-            thread2 = threading.Thread(target=lambda: asyncio.run(connect()), daemon=True)
-            thread2.start()
-            print("Starting thread2")
-        time.sleep(1)
-
-    main()
+    await asyncio.gather(
+        connect(),
+        connect_auth()
+    )
 
 def load_data_from_db(ticker, start_timestamp) -> list:
     conn = sqlite3.connect('trades.db')  # Connect to the SQLite database
@@ -194,7 +174,6 @@ def load_data_from_db(ticker, start_timestamp) -> list:
     conn.close()
     return data_points
 
-
 def create_dollar_bars(data, bar_size) -> pd.DataFrame:
     dollar_bars = []
     
@@ -225,35 +204,40 @@ def create_dollar_bars(data, bar_size) -> pd.DataFrame:
             last_bar['high'] = max(last_bar['high'], price)
             last_bar['low'] = min(last_bar['low'], price)
 
-            if last_bar['dollar_volume'] + price * volume <= bar_size:
+            remaining_dollar_volume = bar_size - last_bar['dollar_volume']
+            trade_dollar_volume = price * volume
+
+            if trade_dollar_volume <= remaining_dollar_volume:
                 last_bar['volume'] += volume
-                last_bar['dollar_volume'] += price * volume
+                last_bar['dollar_volume'] += trade_dollar_volume
                 last_bar['end_time'] = trade['timestamp']
-            else: # Overflow the current bar
-                needed_volume = (bar_size - last_bar['dollar_volume']) / price
-                last_bar['volume'] += needed_volume
+            else:
+                # Fill up the current bar
+                partial_volume = remaining_dollar_volume / price
+                last_bar['volume'] += partial_volume
                 last_bar['dollar_volume'] = bar_size
                 last_bar['end_time'] = trade['timestamp']
 
-                num_new_bars = (price * volume - needed_volume) / bar_size
-                num_new_bars = int(np.ceil(num_new_bars))
-                excess_volume = (price * volume - needed_volume) % bar_size
-                for _ in range(num_new_bars):
+                # Start new bars with the remaining volume
+                remaining_volume = volume - partial_volume
+                remaining_dollar_volume = trade_dollar_volume - remaining_dollar_volume
+
+                while remaining_dollar_volume > 0:
+                    bar_volume = min(remaining_volume, bar_size / price)
+                    bar_dollar_volume = bar_volume * price
                     new_bar = {
                         'start_time': trade['timestamp'],
-                        'end_time': trade['timestamp'],
                         'open': price,
                         'high': price,
                         'low': price,
                         'close': price,
-                        'volume': bar_size / price,
-                        'dollar_volume': bar_size
+                        'volume': bar_volume,
+                        'dollar_volume': bar_dollar_volume,
+                        'end_time': trade['timestamp']
                     }
                     dollar_bars.append(new_bar)
-
-                if excess_volume > 0:
-                    dollar_bars[-1]['volume'] += excess_volume / price
-                    dollar_bars[-1]['dollar_volume'] += excess_volume
+                    remaining_volume -= bar_volume
+                    remaining_dollar_volume -= bar_dollar_volume
 
     # Convert list of dictionaries to DataFrame
     df = pd.DataFrame(dollar_bars)
@@ -265,7 +249,6 @@ def read_data(symbol, start_timestamp):
     print("Reading data from the database...")
     # Load data from the database
     bar_size = 500000
-    bar_size = 20000
     data = load_data_from_db(symbol, start_timestamp)
     # Create dollar bars
     dollar_bars = create_dollar_bars(data, bar_size)
@@ -276,9 +259,11 @@ def read_data(symbol, start_timestamp):
     mpf.plot(dollar_bars, type='candle', style='charles', title='charts/' + symbol.replace("/", "_") + ".png")
     plt.show()
 
-
 if __name__ == "__main__":
-    if sys.argv[1] == "record":
-        create_threads()
+    if len(sys.argv) > 1 and sys.argv[1] == "record":
+        asyncio.run(main())
     else:
-        read_data('XRP/USD', datetime.datetime(2024, 11, 24))
+        symbol = "XRP/USD"
+        if len(sys.argv) > 2:
+            symbol = sys.argv[2]
+        read_data(symbol, datetime.datetime(2024, 11, 24))
