@@ -84,7 +84,9 @@ async def connect():
     while not shutodwn_event.is_set():
         try:
             # Setup database connection and create the trades table
-            with sqlite3.connect('trades.db') as conn:  # Use context manager to ensure closure
+            # get env variable DB_PATH or use default value
+            db_path = os.getenv('DB_PATH', 'trades.db')
+            with sqlite3.connect(db_path) as conn:  # Use context manager to ensure closure
                 cursor = conn.cursor()
                 cursor.execute('''CREATE TABLE IF NOT EXISTS trades (
                                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,22 +143,23 @@ async def main():
     )
 
 def load_data_from_db(ticker, start_timestamp) -> list:
-    conn = sqlite3.connect('trades.db')  # Connect to the SQLite database
+    db_path = os.getenv('DB_PATH', 'trades.db')
+    conn = sqlite3.connect(db_path)  # Connect to the SQLite database
     cursor = conn.cursor()
-    
+
     # Format the start_timestamp for SQL query
     formatted_start_time = start_timestamp.isoformat()
 
     # Query to fetch data starting from the specified timestamp
     query = f"""
-    SELECT symbol, side, qty, price, ord_type, trade_id, timestamp 
-    FROM trades 
+    SELECT symbol, side, qty, price, ord_type, trade_id, timestamp
+    FROM trades
     WHERE symbol='{ticker}' AND timestamp >= '{formatted_start_time}'
     """
-    
+
     cursor.execute(query)
     rows = cursor.fetchall()
-    
+
     # Convert each row to a dictionary
     data_points = []
     for row in rows:
@@ -170,13 +173,13 @@ def load_data_from_db(ticker, start_timestamp) -> list:
             'timestamp': datetime.datetime.strptime(row[6], "%Y-%m-%dT%H:%M:%S.%fZ")
         }
         data_points.append(data_point)
-    
+
     conn.close()
     return data_points
 
 def create_dollar_bars(data, bar_size) -> pd.DataFrame:
     dollar_bars = []
-    
+
     # Sort the data by timestamp
     sorted_data = sorted(data, key=lambda x: x['timestamp'])
 
@@ -239,25 +242,193 @@ def create_dollar_bars(data, bar_size) -> pd.DataFrame:
                     remaining_volume -= bar_volume
                     remaining_dollar_volume -= bar_dollar_volume
 
+                    if remaining_volume <= 0:
+                        break
+
     # Convert list of dictionaries to DataFrame
     df = pd.DataFrame(dollar_bars)
     df.set_index('start_time', inplace=True)
 
     return df
 
+def classify_trade_tick_rule(trade_price, previous_price, last_side):
+    if trade_price > previous_price:
+        return 'buy'
+    elif trade_price < previous_price:
+        return 'sell'
+    else:
+        # If price hasn't changed, repeat the last classification
+        return last_side or 'buy'  # Default assumption
+
+def create_dollar_imbalance_bars(data_points, theta) -> pd.DataFrame:
+    cumulative_buy_dollar = 0
+    cumulative_sell_dollar = 0
+    delta = 0
+    bars = []
+    current_bar = {
+        'open': None,
+        'high': float('-inf'),
+        'low': float('inf'),
+        'close': None,
+        'volume': 0,
+        'trades': [],
+        'num_trades': 0,
+        'start_time': None,
+        'end_time': None
+    }
+    previous_price = None
+    last_side = None
+
+    for idx, trade in enumerate(data_points):
+        # Use 'side' if available, else classify
+        if 'side' in trade and trade['side'] in ['buy', 'sell']:
+            side = trade['side']
+        else:
+            if previous_price is not None:
+                side = classify_trade_tick_rule(trade['price'], previous_price, last_side)
+            else:
+                side = 'buy'  # Default for the first trade
+            trade['side'] = side  # Add side to trade data
+
+        qty = trade['qty']
+        price = trade['price']
+        timestamp = trade['timestamp']
+        dollar_value = qty * price
+
+        # Initialize current bar's open price and start time
+        if current_bar['open'] is None:
+            current_bar['open'] = price
+            current_bar['start_time'] = timestamp
+
+        # Update high and low
+        current_bar['high'] = max(current_bar['high'], price)
+        current_bar['low'] = min(current_bar['low'], price)
+
+        # Update volume and trades
+        current_bar['volume'] += qty
+        current_bar['trades'].append(trade)
+        current_bar['num_trades'] += 1
+
+        # Update cumulative dollar volumes
+        if side == 'buy':
+            cumulative_buy_dollar += dollar_value
+        elif side == 'sell':
+            cumulative_sell_dollar += dollar_value
+
+        # Update dollar imbalance
+        delta = cumulative_buy_dollar - cumulative_sell_dollar
+
+        # Check if threshold is reached
+        if abs(delta) >= theta:
+            # Set close price and end time
+            current_bar['close'] = price
+            current_bar['end_time'] = timestamp
+
+            # Add bar to list
+            bars.append(current_bar.copy())
+
+            # Reset for next bar
+            cumulative_buy_dollar = 0
+            cumulative_sell_dollar = 0
+            delta = 0
+            current_bar = {
+                'open': None,
+                'high': float('-inf'),
+                'low': float('inf'),
+                'close': None,
+                'volume': 0,
+                'trades': [],
+                'num_trades': 0,
+                'start_time': None,
+                'end_time': None
+            }
+
+        # Update previous price and side for tick test
+        previous_price = price
+        last_side = side
+
+    # Handle the last bar if needed
+    if current_bar['trades']:
+        current_bar['close'] = current_bar['trades'][-1]['price']
+        current_bar['end_time'] = current_bar['trades'][-1]['timestamp']
+        bars.append(current_bar)
+
+    # Convert list of dictionaries to DataFrame
+    df = pd.DataFrame(bars)
+    df.set_index('start_time', inplace=True)
+    return df
+
+def add_features(data):
+    # Calculate a moving average of the close prices
+    data['close_ma_20'] = data['close'].rolling(window=20).mean()
+    # Calculate the exponential moving average of the close prices
+    data['close_ema_20'] = data['close'].ewm(span=20, adjust=True).mean()
+    # Calculate the relative strength index
+    delta = data['close'].diff()
+    rsi_period = 10
+    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
+    rs = gain / loss
+    data['rsi'] = 100 - (100 / (1 + rs))
+
+def plot_chart(data, symbol):
+    # Plot the OHLC chart with the derived features (MA, EMA, RSI, MACD)
+    fig, ax = plt.subplots(3, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1, 1]})
+
+    # Plot the OHLC chart
+    mpf.plot(data, type='candle', ax=ax[0], style='charles')
+    # Plot the moving averages
+    # if 'close_ma_20' in data.columns:
+    #     data = data.dropna(subset=['close_ma_20'])
+    #     ax[0].plot(data.index, data['close_ma_20'], label='MA 20', color='blue', linewidth=1)
+    # if 'close_ema_20' in data.columns:
+    #     data = data.dropna(subset=['close_ema_20'])
+    #     ax[0].plot(data.index, data['close_ema_20'], label='EMA 20', color='red', linewidth=1)
+
+    # Add legend
+    ax[0].legend()
+
+    # Plot the RSI
+    if 'rsi' in data.columns:
+        ax[1].plot(data.index, data['rsi'], label='RSI', color='purple', linewidth=1)
+
+        ax[1].axhline(80, color='orange', linestyle='--', linewidth=0.5)
+        ax[1].axhline(70, color='red', linestyle='--', linewidth=0.5)
+        ax[1].axhline(50, color='black', linestyle='--', linewidth=0.5)
+        ax[1].axhline(30, color='green', linestyle='--', linewidth=0.5)
+        ax[1].axhline(20, color='blue', linestyle='--', linewidth=0.5)
+        ax[1].set_title('Relative Strength Index')
+        ax[1].legend()
+
+    # Plot the volume
+    ax[2].plot(data.index, data['num_trades'], color='gray', label='Trades')
+
+    plt.tight_layout()
+    plt.show()
+
+
 def read_data(symbol, start_timestamp):
     print("Reading data from the database...")
     # Load data from the database
-    bar_size = 500000
+    # bar_size = 500000
+    # bar_size = 1000000
+    imablance_theta = 1000000
     data = load_data_from_db(symbol, start_timestamp)
     # Create dollar bars
-    dollar_bars = create_dollar_bars(data, bar_size)
-    print(dollar_bars.head())
-    print(dollar_bars.tail())
+    # dollar_bars = create_dollar_bars(data, bar_size)
+    # print(dollar_bars.head())
+    # print(dollar_bars.tail())
+    # add_features(dollar_bars)
 
+
+    # plot_chart(dollar_bars, symbol)
+
+    dib_bars = create_dollar_imbalance_bars(data, imablance_theta)
+    add_features(dib_bars)
+    plot_chart(dib_bars, symbol)
     # Plot the OHLC chart
-    mpf.plot(dollar_bars, type='candle', style='charles', title='charts/' + symbol.replace("/", "_") + ".png")
-    plt.show()
+    # mpf.plot(dollar_bars, type='candle', style='charles', title='charts/' + symbol.replace("/", "_") + ".png")
+    # plt.show()
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "record":
