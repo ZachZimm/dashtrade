@@ -150,22 +150,22 @@ async def connect():
             print("Database connection closed.")
 
 
-# async def main():
-#     global ws_token
-#     signal.signal(signal.SIGINT, signal_handler)
-#     await asyncio.gather(
-#         connect(),
-#         connect_auth()
-#     )
+async def main():
+    global ws_token
+    signal.signal(signal.SIGINT, signal_handler)
+    await asyncio.gather(
+        connect(),
+        connect_auth()
+    )
 
 async def shutdown():
     print("\nShutting down...")
     shutdown_event.set()
 
-async def main():
-    loop = asyncio.get_event_loop()
-    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(shutdown()))
-    loop.run_until_complete(asyncio.gather(connect(), connect_auth()))
+# async def main():
+#     loop = asyncio.get_event_loop()
+#     loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(shutdown()))
+#     loop.run_until_complete(asyncio.gather(connect(), connect_auth()))
 
 def load_data_from_db(ticker, start_timestamp) -> list:
     db_path = os.getenv('DB_PATH', 'trades.db')
