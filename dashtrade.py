@@ -18,11 +18,11 @@ import datetime
 load_dotenv()
 ws_token = None
 
-shutodwn_event = asyncio.Event()
+shutdown_event = asyncio.Event()
 
 def signal_handler(sig, frame):
     print("\nShutting down...")
-    shutodwn_event.set()
+    shutdown_event.set()
     sys.exit(0)
 
 def read_balances(data):
@@ -47,25 +47,26 @@ subscribe_data = {
     }
 }
 
-balance_subscribe_data = {
-    "method": "subscribe",
-    "params": {
-        "channel": "balances",
-        "token": ws_token
-    }
-}
+
 
 # Create a websocket connection
 uri = "wss://ws.kraken.com/v2"
 auth_uri = "wss://ws-auth.kraken.com/v2"
 
 async def connect_auth():
-    global ws_token
-    while not shutodwn_event.is_set():
+    while not shutdown_event.is_set():
         try:
+            ws_token = get_token()
+            balance_subscribe_data = {
+                "method": "subscribe",
+                "params": {
+                    "channel": "balances",
+                    "token": ws_token
+                }
+            }
             async with websockets.connect(auth_uri) as websocket:
                 await websocket.send(json.dumps(balance_subscribe_data))
-                while not shutodwn_event.is_set():
+                while not shutdown_event.is_set():
                     try:
                         response = await websocket.recv()
                         response = json.loads(response)
@@ -76,33 +77,37 @@ async def connect_auth():
                     except ConnectionClosedError as e:
                         print(f"Auth ConnectionClosedError: {e}")
                         break
+                    except Exception as e:
+                        print(f"Auth Exception: {e}")
+                        break
         except Exception as e:
             print(f"Auth Connection Exception: {e}")
             await asyncio.sleep(1)  # Wait before reconnecting
 
 async def connect():
-    while not shutodwn_event.is_set():
-        try:
-            # Setup database connection and create the trades table
-            # get env variable DB_PATH or use default value
-            db_path = os.getenv('DB_PATH', 'trades.db')
-            with sqlite3.connect(db_path) as conn:  # Use context manager to ensure closure
-                cursor = conn.cursor()
-                cursor.execute('''CREATE TABLE IF NOT EXISTS trades (
-                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                    symbol TEXT,
-                                    side TEXT,
-                                    qty REAL,
-                                    price REAL,
-                                    ord_type TEXT,
-                                    trade_id INTEGER,
-                                    timestamp TEXT
-                                )''')
-                conn.commit()
+    conn = None
+    try:
+        # Setup database connection and create the trades table
+        db_path = os.getenv('DB_PATH', 'trades.db')
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS trades (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            symbol TEXT,
+                            side TEXT,
+                            qty REAL,
+                            price REAL,
+                            ord_type TEXT,
+                            trade_id INTEGER,
+                            timestamp TEXT
+                        )''')
+        conn.commit()
 
-                async with websockets.connect(uri) as websocket:
+        while not shutdown_event.is_set():
+            try:
+                async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as websocket:
                     await websocket.send(json.dumps(subscribe_data))
-                    while not shutodwn_event.is_set():
+                    while not shutdown_event.is_set():
                         try:
                             response = await websocket.recv()
                             response = json.loads(response)
@@ -126,21 +131,41 @@ async def connect():
                                         conn.commit()
                             else:
                                 print(response)
+                        except json.JSONDecodeError as e:
+                            print(f"Trade JSONDecodeError: {e}")
+                            continue
                         except ConnectionClosedError as e:
                             print(f"Trade ConnectionClosedError: {e}")
                             break
-        except Exception as e:
-            print(f"Trade Connection Exception: {e}")
-            await asyncio.sleep(1)  # Wait before reconnecting
+                        except Exception as e:
+                            print(f"Trade Exception: {e}")
+                            break
+            except Exception as e:
+                print(f"Trade Connection Exception: {e}")
+                await asyncio.sleep(1)  # Wait before reconnecting
+    finally:
+        # Ensure the database connection is closed
+        if conn:
+            conn.close()
+            print("Database connection closed.")
+
+
+# async def main():
+#     global ws_token
+#     signal.signal(signal.SIGINT, signal_handler)
+#     await asyncio.gather(
+#         connect(),
+#         connect_auth()
+#     )
+
+async def shutdown():
+    print("\nShutting down...")
+    shutdown_event.set()
 
 async def main():
-    global ws_token
-    ws_token = get_token()
-    signal.signal(signal.SIGINT, signal_handler)
-    await asyncio.gather(
-        connect(),
-        connect_auth()
-    )
+    loop = asyncio.get_event_loop()
+    loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(shutdown()))
+    loop.run_until_complete(asyncio.gather(connect(), connect_auth()))
 
 def load_data_from_db(ticker, start_timestamp) -> list:
     db_path = os.getenv('DB_PATH', 'trades.db')
@@ -184,7 +209,7 @@ def create_dollar_bars(data, bar_size) -> pd.DataFrame:
     sorted_data = sorted(data, key=lambda x: x['timestamp'])
 
     for trade in sorted_data:
-        symbol = trade['symbol']
+        # symbol = trade['symbol']
         price = trade['price']
         volume = trade['qty']
 
@@ -378,7 +403,7 @@ def plot_chart(data, symbol):
     # Plot the OHLC chart
     mpf.plot(data, type='candle', ax=ax[0], style='charles')
     # Plot the moving averages
-    # if 'close_ma_20' in data.columns:
+    # if 'close_ma_20' in data.columns, ping_interval=20, ping_timeout=:
     #     data = data.dropna(subset=['close_ma_20'])
     #     ax[0].plot(data.index, data['close_ma_20'], label='MA 20', color='blue', linewidth=1)
     # if 'close_ema_20' in data.columns:
@@ -412,7 +437,7 @@ def read_data(symbol, start_timestamp):
     # Load data from the database
     # bar_size = 500000
     # bar_size = 1000000
-    imablance_theta = 1000000
+    imablance_theta = 1500000
     data = load_data_from_db(symbol, start_timestamp)
     # Create dollar bars
     # dollar_bars = create_dollar_bars(data, bar_size)
