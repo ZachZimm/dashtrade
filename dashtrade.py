@@ -384,10 +384,27 @@ def create_dollar_imbalance_bars(data_points, theta) -> pd.DataFrame:
     return df
 
 def add_features(data):
+    print("Data has rows " + str(data.shape[0]))
     # Calculate a moving average of the close prices
     data['close_ma_20'] = data['close'].rolling(window=20).mean()
     # Calculate the exponential moving average of the close prices
+    data['close_ema_10'] = data['close'].ewm(span=10, adjust=True).mean()
     data['close_ema_20'] = data['close'].ewm(span=20, adjust=True).mean()
+    data['close_ema_50'] = data['close'].ewm(span=50, adjust=True).mean()
+    data['close_ema_100'] = data['close'].ewm(span=100, adjust=True).mean()
+    data['ema_20/50'] = data['close_ema_20'] / data['close_ema_50']
+    data['ema_20/100'] = data['close_ema_20'] / data['close_ema_100']
+    data['ema_div_diff'] = data['ema_20/50'] - data['ema_20/100']
+
+    data['ema_20-50'] = data['close_ema_20'] - data['close_ema_50']
+    data['ema_20-100'] = data['close_ema_20'] - data['close_ema_100']
+
+    data['ext_ema_10'] = data['close'] - data['close_ema_10']
+    data['ext_ema_20'] = data['close'] - data['close_ema_20']
+    data['ext_ema_50'] = data['close'] - data['close_ema_50']
+    data['ext_ema_100'] = data['close'] - data['close_ema_100']
+
+
     # Calculate the relative strength index
     delta = data['close'].diff()
     rsi_period = 10
@@ -398,17 +415,42 @@ def add_features(data):
 
 def plot_chart(data, symbol):
     # Plot the OHLC chart with the derived features (MA, EMA, RSI, MACD)
-    fig, ax = plt.subplots(3, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1, 1]})
+    num_bars_to_plot = 85
+    data = data.iloc[-num_bars_to_plot:]
+    fig, ax = plt.subplots(4, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1, 3, 3]})
 
     # Plot the OHLC chart
     mpf.plot(data, type='candle', ax=ax[0], style='charles')
     # Plot the moving averages
-    # if 'close_ma_20' in data.columns, ping_interval=20, ping_timeout=:
+    # if 'close_ma_20' in data.columns:
     #     data = data.dropna(subset=['close_ma_20'])
     #     ax[0].plot(data.index, data['close_ma_20'], label='MA 20', color='blue', linewidth=1)
     # if 'close_ema_20' in data.columns:
     #     data = data.dropna(subset=['close_ema_20'])
-    #     ax[0].plot(data.index, data['close_ema_20'], label='EMA 20', color='red', linewidth=1)
+    #     ax[2].plot(data.index, data['close_ema_20'], label='EMA 20', color='red', linewidth=1)
+    # if 'ema_20/50' in data.columns:
+    #     data = data.dropna(subset=['ema_20/50'])
+    #     ax[2].axhline(1, color='black', linestyle='--', linewidth=0.5)
+    #     ax[2].plot(data.index, data['ema_20/50'], label='EMA 20/50', color='green', linewidth=1)
+    #     ax[2].plot(data.index, data['ema_20/100'], label='EMA 20/100', color='blue', linewidth=1)
+    if 'ext_ema_20' in data.columns:
+        data = data.dropna(subset=['ext_ema_20'])
+        ax[2].axhline(0, color='black', linestyle='--', linewidth=0.5)
+        ax[2].plot(data.index, data['ext_ema_10'], label='Ext EMA 10', color='purple', linewidth=1)
+        ax[2].plot(data.index, data['ext_ema_20'], label='Ext EMA 20', color='red', linewidth=1)
+        ax[2].plot(data.index, data['ext_ema_50'], label='Ext EMA 50', color='green', linewidth=1)
+        ax[2].plot(data.index, data['ext_ema_100'], label='Ext EMA 100', color='blue', linewidth=1)
+
+    # if 'ema_20-50' in data.columns:
+    #     data = data.dropna(subset=['ema_20-50'])
+    #     ax[3].axhline(0, color='black', linestyle='--', linewidth=0.5)
+    #     ax[3].plot(data.index, data['ema_20-50'], label='EMA 20-50', color='green', linewidth=1)
+    #     ax[3].plot(data.index, data['ema_20-100'], label='EMA 20-100', color='blue', linewidth=1)
+
+    if 'ema_div_diff' in data.columns:
+        data = data.dropna(subset=['ema_div_diff'])
+        ax[3].axhline(0, color='black', linestyle='--', linewidth=0.5)
+        ax[3].plot(data.index, data['ema_div_diff'], label='EMA Div Diff', color='green', linewidth=1)
 
     # Add legend
     ax[0].legend()
@@ -425,8 +467,8 @@ def plot_chart(data, symbol):
         ax[1].set_title('Relative Strength Index')
         ax[1].legend()
 
-    # Plot the volume
-    ax[2].plot(data.index, data['num_trades'], color='gray', label='Trades')
+    # Plot the trades
+    # ax[3].plot(data.index, data['num_trades'], color='gray', label='Trades')
 
     plt.tight_layout()
     plt.show()
@@ -438,6 +480,7 @@ def read_data(symbol, start_timestamp):
     # bar_size = 500000
     # bar_size = 1000000
     imablance_theta = 1500000
+    imablance_theta = 1000000
     data = load_data_from_db(symbol, start_timestamp)
     # Create dollar bars
     # dollar_bars = create_dollar_bars(data, bar_size)
