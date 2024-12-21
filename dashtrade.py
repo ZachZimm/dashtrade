@@ -155,7 +155,7 @@ async def main():
     signal.signal(signal.SIGINT, signal_handler)
     await asyncio.gather(
         connect(),
-        connect_auth()
+        # connect_auth()
     )
 
 async def shutdown():
@@ -378,8 +378,10 @@ def create_dollar_imbalance_bars(data_points, theta) -> pd.DataFrame:
         current_bar['end_time'] = current_bar['trades'][-1]['timestamp']
         bars.append(current_bar)
 
+
     # Convert list of dictionaries to DataFrame
     df = pd.DataFrame(bars)
+    print(f"Last bar imablance: {delta}")
     df.set_index('start_time', inplace=True)
     return df
 
@@ -399,10 +401,10 @@ def add_features(data):
     data['ema_20-50'] = data['close_ema_20'] - data['close_ema_50']
     data['ema_20-100'] = data['close_ema_20'] - data['close_ema_100']
 
-    data['ext_ema_10'] = data['close'] - data['close_ema_10']
-    data['ext_ema_20'] = data['close'] - data['close_ema_20']
-    data['ext_ema_50'] = data['close'] - data['close_ema_50']
-    data['ext_ema_100'] = data['close'] - data['close_ema_100']
+    data['ext_ema_10'] = ((data['close'] - data['close_ema_10']) / data['close_ema_10']) * 100
+    data['ext_ema_20'] = ((data['close'] - data['close_ema_20']) / data['close_ema_20']) * 100
+    data['ext_ema_50'] = ((data['close'] - data['close_ema_50']) / data['close_ema_50']) * 100
+    data['ext_ema_100'] = ((data['close'] - data['close_ema_100']) / data['close_ema_100']) * 100
 
 
     # Calculate the relative strength index
@@ -415,7 +417,8 @@ def add_features(data):
 
 def plot_chart(data, symbol):
     # Plot the OHLC chart with the derived features (MA, EMA, RSI, MACD)
-    num_bars_to_plot = 85
+    num_bars_to_plot = 150
+    num_bars_to_plot = 370
     data = data.iloc[-num_bars_to_plot:]
     fig, ax = plt.subplots(4, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1, 3, 3]})
 
@@ -436,6 +439,12 @@ def plot_chart(data, symbol):
     if 'ext_ema_20' in data.columns:
         data = data.dropna(subset=['ext_ema_20'])
         ax[2].axhline(0, color='black', linestyle='--', linewidth=0.5)
+        ax[2].axhline(2.5, color='green', linestyle='--', linewidth=0.5)
+        ax[2].axhline(-2.5, color='green', linestyle='--', linewidth=0.5)
+        ax[2].axhline(5, color='orange', linestyle='--', linewidth=0.5)
+        ax[2].axhline(-5, color='orange', linestyle='--', linewidth=0.5)
+        ax[2].axhline(10, color='red', linestyle='--', linewidth=0.5)
+        ax[2].axhline(-10, color='red', linestyle='--', linewidth=0.5)
         ax[2].plot(data.index, data['ext_ema_10'], label='Ext EMA 10', color='purple', linewidth=1)
         ax[2].plot(data.index, data['ext_ema_20'], label='Ext EMA 20', color='red', linewidth=1)
         ax[2].plot(data.index, data['ext_ema_50'], label='Ext EMA 50', color='green', linewidth=1)
@@ -481,6 +490,7 @@ def read_data(symbol, start_timestamp):
     # bar_size = 1000000
     imablance_theta = 1500000
     imablance_theta = 1000000
+    # imablance_theta = 750000
     data = load_data_from_db(symbol, start_timestamp)
     # Create dollar bars
     # dollar_bars = create_dollar_bars(data, bar_size)
