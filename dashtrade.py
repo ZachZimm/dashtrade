@@ -381,8 +381,14 @@ def create_dollar_imbalance_bars(data_points, theta) -> pd.DataFrame:
 
     # Convert list of dictionaries to DataFrame
     df = pd.DataFrame(bars)
-    print(f"Last bar imablance: {delta}")
     df.set_index('start_time', inplace=True)
+
+    print(f"Last bar imablance: {delta}")
+    utc_tz = datetime.timezone.utc
+    current_utc_time = datetime.datetime.now(tz=utc_tz)
+    last_trade_time = current_bar['end_time'].replace(tzinfo=utc_tz)
+    data_recency = current_utc_time - last_trade_time
+    print(f"Data recency:\t{data_recency}")
     return df
 
 def add_features(data):
