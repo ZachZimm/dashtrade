@@ -8,7 +8,7 @@ import websockets
 from websockets.exceptions import ConnectionClosedError
 from dotenv import load_dotenv
 from rest_websocket_token import get_token
-import sqlite3
+import asyncpg
 import pandas as pd
 import matplotlib.pyplot as plt
 import mplfinance as mpf
@@ -43,7 +43,7 @@ subscribe_data = {
     "method": "subscribe",
     "params": {
         "channel": "trade",
-        "symbol": ["XRP/USD", "ETH/USD", "BTC/USD", "ADA/USD", "SOL/USD", "DOGE/USD"],
+        "symbol": ["XRP/USD", "XRP/BTC", "ETH/USD", "ETH/BTC", "BTC/USD", "ADA/USD", "SOL/USD", "SOL/BTC", "DOGE/USD", "JUP/USD", "FARTCOIN/USD"],
     }
 }
 
@@ -85,24 +85,33 @@ async def connect_auth():
             await asyncio.sleep(1)  # Wait before reconnecting
 
 async def connect():
-    conn = None
-    try:
-        # Setup database connection and create the trades table
-        db_path = os.getenv('DB_PATH', 'trades.db')
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS trades (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            symbol TEXT,
-                            side TEXT,
-                            qty REAL,
-                            price REAL,
-                            ord_type TEXT,
-                            trade_id INTEGER,
-                            timestamp TEXT
-                        )''')
-        conn.commit()
+    # Retrieve DB credentials from .env
+    db_host = os.getenv('DB_HOST', 'localhost')
+    db_port = int(os.getenv('DB_PORT', 5432))
+    db_user = os.getenv('DB_USER', 'postgres')
+    db_pass = os.getenv('DB_PASS', 'password')
+    db_name = os.getenv('DB_NAME', 'dashtrade')
 
+    # Establish an asynchronous connection to Postgres
+    conn = await asyncpg.connect(
+        host=db_host, port=db_port, user=db_user, password=db_pass, database=db_name
+    )
+
+    # Create the trades table (if it doesn't exist) using Postgres syntax
+    await conn.execute('''
+        CREATE TABLE IF NOT EXISTS trades (
+            id SERIAL PRIMARY KEY,
+            symbol TEXT,
+            side TEXT,
+            qty REAL,
+            price REAL,
+            ord_type TEXT,
+            trade_id INTEGER,
+            timestamp TIMESTAMPTZ
+        )
+    ''')
+
+    try:
         while not shutdown_event.is_set():
             try:
                 async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as websocket:
@@ -111,24 +120,26 @@ async def connect():
                         try:
                             response = await websocket.recv()
                             response = json.loads(response)
-                            if 'channel' in response and response['channel'] == "heartbeat":
+                            if response.get('channel') == "heartbeat":
                                 continue
-                            if 'channel' in response and response['channel'] == "trade":
-                                if 'data' in response:
-                                    for trade in response['data']:
-                                        # Extract fields from the trade data
-                                        symbol = trade['symbol']
-                                        side = trade['side']
-                                        qty = trade['qty']
-                                        price = trade['price']
-                                        ord_type = trade['ord_type']
-                                        trade_id = trade['trade_id']
-                                        timestamp = trade['timestamp']
-                                        # Insert the trade data into the database
-                                        cursor.execute('''INSERT INTO trades (symbol, side, qty, price, ord_type, trade_id, timestamp)
-                                                          VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                                                       (symbol, side, qty, price, ord_type, trade_id, timestamp))
-                                        conn.commit()
+                            if response.get('channel') == "trade" and 'data' in response:
+                                for trade in response['data']:
+                                    # Extract trade fields
+                                    symbol = trade['symbol']
+                                    side = trade['side']
+                                    qty = trade['qty']
+                                    price = trade['price']
+                                    ord_type = trade['ord_type']
+                                    trade_id = trade['trade_id']
+                                    timestamp = trade['timestamp']
+                                    # ensure that timestamp is a datetime object
+                                    if isinstance(timestamp, str):
+                                        timestamp = datetime.datetime.fromisoformat(timestamp)
+                                    # Asynchronously insert the trade data into the database
+                                    await conn.execute('''
+                                        INSERT INTO trades (symbol, side, qty, price, ord_type, trade_id, timestamp)
+                                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                    ''', symbol, side, qty, price, ord_type, trade_id, timestamp)
                             else:
                                 print(response)
                         except json.JSONDecodeError as e:
@@ -142,12 +153,10 @@ async def connect():
                             break
             except Exception as e:
                 print(f"Trade Connection Exception: {e}")
-                await asyncio.sleep(1)  # Wait before reconnecting
+                await asyncio.sleep(1)
     finally:
-        # Ensure the database connection is closed
-        if conn:
-            conn.close()
-            print("Database connection closed.")
+        await conn.close()
+        print("Database connection closed.")
 
 
 async def main():
@@ -167,40 +176,41 @@ async def shutdown():
 #     loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(shutdown()))
 #     loop.run_until_complete(asyncio.gather(connect(), connect_auth()))
 
-def load_data_from_db(ticker, start_timestamp) -> list:
-    db_path = os.getenv('DB_PATH', 'trades.db')
-    conn = sqlite3.connect(db_path)  # Connect to the SQLite database
-    cursor = conn.cursor()
+async def load_data_from_db(ticker, start_timestamp) -> list:
+    # Retrieve DB credentials from .env
+    db_host = os.getenv('DB_HOST', 'localhost')
+    db_port = int(os.getenv('DB_PORT', 5432))
+    db_user = os.getenv('DB_USER', 'postgres')
+    db_pass = os.getenv('DB_PASS', 'password')
+    db_name = os.getenv('DB_NAME', 'dashtrade')
 
-    # Format the start_timestamp for SQL query
-    formatted_start_time = start_timestamp.isoformat()
+    # Establish an asynchronous connection to Postgres
+    conn = await asyncpg.connect(
+        host=db_host, port=db_port, user=db_user, password=db_pass, database=db_name
+    )
 
-    # Query to fetch data starting from the specified timestamp
-    query = f"""
-    SELECT symbol, side, qty, price, ord_type, trade_id, timestamp
-    FROM trades
-    WHERE symbol='{ticker}' AND timestamp >= '{formatted_start_time}'
+    query = """
+        SELECT symbol, side, qty, price, ord_type, trade_id, timestamp
+        FROM trades
+        WHERE symbol = $1 AND timestamp >= $2
     """
-
-    cursor.execute(query)
-    rows = cursor.fetchall()
-
-    # Convert each row to a dictionary
+    rows = await conn.fetch(query, ticker, start_timestamp)
     data_points = []
     for row in rows:
+        # asyncpg returns Record objects that can be accessed like dicts.
         data_point = {
-            'symbol': row[0],
-            'side': row[1],
-            'qty': row[2],
-            'price': row[3],
-            'ord_type': row[4],
-            'trade_id': row[5],
-            'timestamp': datetime.datetime.strptime(row[6], "%Y-%m-%dT%H:%M:%S.%fZ")
+            'symbol': row['symbol'],
+            'side': row['side'],
+            'qty': row['qty'],
+            'price': row['price'],
+            'ord_type': row['ord_type'],
+            'trade_id': row['trade_id'],
+            'timestamp': row['timestamp']  # should already be a datetime object
         }
         data_points.append(data_point)
-
-    conn.close()
+    await conn.close()
     return data_points
+
 
 def create_dollar_bars(data, bar_size) -> pd.DataFrame:
     dollar_bars = []
@@ -415,7 +425,7 @@ def add_features(data):
 
     # Calculate the relative strength index
     delta = data['close'].diff()
-    rsi_period = 10
+    rsi_period = 14
     gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
     rs = gain / loss
@@ -424,7 +434,7 @@ def add_features(data):
 def plot_chart(data, symbol):
     # Plot the OHLC chart with the derived features (MA, EMA, RSI, MACD)
     num_bars_to_plot = 150
-    num_bars_to_plot = 370
+    # num_bars_to_plot = 650
     data = data.iloc[-num_bars_to_plot:]
     fig, ax = plt.subplots(4, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [3, 1, 3, 3]})
 
@@ -437,11 +447,11 @@ def plot_chart(data, symbol):
     # if 'close_ema_20' in data.columns:
     #     data = data.dropna(subset=['close_ema_20'])
     #     ax[2].plot(data.index, data['close_ema_20'], label='EMA 20', color='red', linewidth=1)
-    # if 'ema_20/50' in data.columns:
-    #     data = data.dropna(subset=['ema_20/50'])
-    #     ax[2].axhline(1, color='black', linestyle='--', linewidth=0.5)
-    #     ax[2].plot(data.index, data['ema_20/50'], label='EMA 20/50', color='green', linewidth=1)
-    #     ax[2].plot(data.index, data['ema_20/100'], label='EMA 20/100', color='blue', linewidth=1)
+    if 'ema_20/50' in data.columns:
+        data = data.dropna(subset=['ema_20/50'])
+        ax[3].axhline(1, color='black', linestyle='--', linewidth=0.5)
+        ax[3].plot(data.index, data['ema_20/50'], label='EMA 20/50', color='green', linewidth=1)
+        ax[3].plot(data.index, data['ema_20/100'], label='EMA 20/100', color='blue', linewidth=1)
     if 'ext_ema_20' in data.columns:
         data = data.dropna(subset=['ext_ema_20'])
         ax[2].axhline(0, color='black', linestyle='--', linewidth=0.5)
@@ -462,10 +472,10 @@ def plot_chart(data, symbol):
     #     ax[3].plot(data.index, data['ema_20-50'], label='EMA 20-50', color='green', linewidth=1)
     #     ax[3].plot(data.index, data['ema_20-100'], label='EMA 20-100', color='blue', linewidth=1)
 
-    if 'ema_div_diff' in data.columns:
-        data = data.dropna(subset=['ema_div_diff'])
-        ax[3].axhline(0, color='black', linestyle='--', linewidth=0.5)
-        ax[3].plot(data.index, data['ema_div_diff'], label='EMA Div Diff', color='green', linewidth=1)
+    # if 'ema_div_diff' in data.columns:
+    #     data = data.dropna(subset=['ema_div_diff'])
+    #     ax[3].axhline(0, color='black', linestyle='--', linewidth=0.5)
+    #     ax[3].plot(data.index, data['ema_div_diff'], label='EMA Div Diff', color='green', linewidth=1)
 
     # Add legend
     ax[0].legend()
@@ -489,15 +499,15 @@ def plot_chart(data, symbol):
     plt.show()
 
 
-def read_data(symbol, start_timestamp):
+async def read_data(symbol, start_timestamp, plot=False):
     print("Reading data from the database...")
     # Load data from the database
     # bar_size = 500000
     # bar_size = 1000000
     imablance_theta = 1500000
-    imablance_theta = 1000000
+    # imablance_theta = 1000000
     # imablance_theta = 750000
-    data = load_data_from_db(symbol, start_timestamp)
+    data = await load_data_from_db(symbol, start_timestamp)
     # Create dollar bars
     # dollar_bars = create_dollar_bars(data, bar_size)
     # print(dollar_bars.head())
@@ -509,7 +519,8 @@ def read_data(symbol, start_timestamp):
 
     dib_bars = create_dollar_imbalance_bars(data, imablance_theta)
     add_features(dib_bars)
-    plot_chart(dib_bars, symbol)
+    if plot:
+        plot_chart(dib_bars, symbol)
     # Plot the OHLC chart
     # mpf.plot(dollar_bars, type='candle', style='charles', title='charts/' + symbol.replace("/", "_") + ".png")
     # plt.show()
@@ -517,8 +528,21 @@ def read_data(symbol, start_timestamp):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "record":
         asyncio.run(main())
+    help_strings = ['help', '-h', '--help', '-help']
+    if len(sys.argv) > 1 and sys.argv[1] in help_strings:
+        print("Usage: python dashtrade.py [record] [symbol] [plot]")
+        print("Example: python dashtrade.py record")
+        print("Example: python dashtrade.py read BTC/USD")
+        print("Example: python dashtrade.py read BTC/USD plot")
     else:
-        symbol = "XRP/USD"
+        symbol = "BTC/USD"
+        plot = False
+        if 'plot' in sys.argv:
+            plot = True
         if len(sys.argv) > 2:
-            symbol = sys.argv[2]
-        read_data(symbol, datetime.datetime(2024, 11, 24))
+            if sys.argv[2] != "plot":
+                symbol = sys.argv[2]
+            elif len(sys.argv) > 3:
+                symbol = sys.argv[2]
+
+        asyncio.run(read_data(symbol, datetime.datetime(2024, 11, 24), plot=plot))
