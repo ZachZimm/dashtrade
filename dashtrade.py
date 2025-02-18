@@ -13,6 +13,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import mplfinance as mpf
 import datetime
+import logging
+
+from orderbook import listen_to_orderbooks
 
 # Load environment variables
 load_dotenv()
@@ -39,11 +42,13 @@ def read_balances(data):
 
     return total_balance
 
+pairs = ["XRP/USD", "XRP/BTC", "ETH/USD", "ETH/BTC", "BTC/USD", "ADA/USD", "SOL/USD", "SOL/BTC", "DOGE/USD", "JUP/USD", "FARTCOIN/USD"]
+
 subscribe_data = {
     "method": "subscribe",
     "params": {
         "channel": "trade",
-        "symbol": ["XRP/USD", "XRP/BTC", "ETH/USD", "ETH/BTC", "BTC/USD", "ADA/USD", "SOL/USD", "SOL/BTC", "DOGE/USD", "JUP/USD", "FARTCOIN/USD"],
+        "symbol": pairs,
     }
 }
 
@@ -84,88 +89,104 @@ async def connect_auth():
             print(f"Auth Connection Exception: {e}")
             await asyncio.sleep(1)  # Wait before reconnecting
 
-async def connect():
+async def connect() -> asyncpg.Pool:
     # Retrieve DB credentials from .env
     db_host = os.getenv('DB_HOST', 'localhost')
     db_port = int(os.getenv('DB_PORT', 5432))
     db_user = os.getenv('DB_USER', 'postgres')
     db_pass = os.getenv('DB_PASS', 'password')
     db_name = os.getenv('DB_NAME', 'dashtrade')
-
-    # Establish an asynchronous connection to Postgres
-    conn = await asyncpg.connect(
-        host=db_host, port=db_port, user=db_user, password=db_pass, database=db_name
-    )
+    dsn = f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+    pool = await asyncpg.create_pool(dsn=dsn, min_size=5, max_size=20)
 
     # Create the trades table (if it doesn't exist) using Postgres syntax
-    await conn.execute('''
-        CREATE TABLE IF NOT EXISTS trades (
-            id SERIAL PRIMARY KEY,
-            symbol TEXT,
-            side TEXT,
-            qty REAL,
-            price REAL,
-            ord_type TEXT,
-            trade_id INTEGER,
-            timestamp TIMESTAMPTZ
-        )
-    ''')
+    async with pool.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS trades (
+                id SERIAL PRIMARY KEY,
+                symbol TEXT,
+                side TEXT,
+                qty REAL,
+                price REAL,
+                ord_type TEXT,
+                trade_id INTEGER,
+                timestamp TIMESTAMPTZ
+            )
+        ''')
 
-    try:
-        while not shutdown_event.is_set():
-            try:
-                async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as websocket:
-                    await websocket.send(json.dumps(subscribe_data))
-                    while not shutdown_event.is_set():
-                        try:
-                            response = await websocket.recv()
-                            response = json.loads(response)
-                            if response.get('channel') == "heartbeat":
-                                continue
-                            if response.get('channel') == "trade" and 'data' in response:
-                                for trade in response['data']:
-                                    # Extract trade fields
-                                    symbol = trade['symbol']
-                                    side = trade['side']
-                                    qty = trade['qty']
-                                    price = trade['price']
-                                    ord_type = trade['ord_type']
-                                    trade_id = trade['trade_id']
-                                    timestamp = trade['timestamp']
-                                    # ensure that timestamp is a datetime object
-                                    if isinstance(timestamp, str):
-                                        timestamp = datetime.datetime.fromisoformat(timestamp)
-                                    # Asynchronously insert the trade data into the database
+    return pool
+    # try:
+async def listen_and_push_trades(pool, shutdown_event):
+    while not shutdown_event.is_set():
+        try:
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as websocket:
+                await websocket.send(json.dumps(subscribe_data))
+                while not shutdown_event.is_set():
+                    try:
+                        response = await websocket.recv()
+                        response = json.loads(response)
+                        if response.get('channel') == "heartbeat":
+                            continue
+                        if response.get('channel') == "trade" and 'data' in response:
+                            for trade in response['data']:
+                                # Extract trade fields
+                                symbol = trade['symbol']
+                                side = trade['side']
+                                qty = trade['qty']
+                                price = trade['price']
+                                ord_type = trade['ord_type']
+                                trade_id = trade['trade_id']
+                                timestamp = trade['timestamp']
+                                # ensure that timestamp is a datetime object
+                                if isinstance(timestamp, str):
+                                    timestamp = datetime.datetime.fromisoformat(timestamp)
+                                # Asynchronously insert the trade data into the database
+                                async with pool.acquire() as conn:
                                     await conn.execute('''
                                         INSERT INTO trades (symbol, side, qty, price, ord_type, trade_id, timestamp)
                                         VALUES ($1, $2, $3, $4, $5, $6, $7)
                                     ''', symbol, side, qty, price, ord_type, trade_id, timestamp)
-                            else:
-                                print(response)
-                        except json.JSONDecodeError as e:
-                            print(f"Trade JSONDecodeError: {e}")
-                            continue
-                        except ConnectionClosedError as e:
-                            print(f"Trade ConnectionClosedError: {e}")
-                            break
-                        except Exception as e:
-                            print(f"Trade Exception: {e}")
-                            break
-            except Exception as e:
-                print(f"Trade Connection Exception: {e}")
-                await asyncio.sleep(1)
-    finally:
-        await conn.close()
-        print("Database connection closed.")
+                        else:
+                            print(response)
+                    except json.JSONDecodeError as e:
+                        print(f"Trade JSONDecodeError: {e}")
+                        continue
+                    except ConnectionClosedError as e:
+                        print(f"Trade ConnectionClosedError: {e}")
+                        break
+                    except Exception as e:
+                        print(f"Trade Exception: {e}")
+                        break
+        except Exception as e:
+            print(f"Trade Connection Exception: {e}")
+            await asyncio.sleep(1)
 
 
-async def main():
+async def main(trades=True, orderbook=True):
     global ws_token
     signal.signal(signal.SIGINT, signal_handler)
-    await asyncio.gather(
-        connect(),
-        # connect_auth()
-    )
+    tasks = []
+    print(f'Recording Options: Trades: {trades}, Orderbook: {orderbook}')
+
+    if trades or orderbook:
+        pool = await connect()
+    else:
+        print("No recording options selected.")
+        return
+
+    try:
+        if trades:
+            tasks.append(asyncio.create_task(listen_and_push_trades(pool, shutdown_event)))
+        if orderbook:
+            tasks.append(asyncio.create_task(listen_to_orderbooks(pairs, pool, shutdown_event)))
+
+        await asyncio.gather(*tasks)
+    except Exception as e:
+        print(f"Main Exception: {e}")
+    finally:
+        await pool.close()
+        print("Database connection closed.")
+
 
 async def shutdown():
     print("\nShutting down...")
@@ -193,6 +214,7 @@ async def load_data_from_db(ticker, start_timestamp) -> list:
         SELECT symbol, side, qty, price, ord_type, trade_id, timestamp
         FROM trades
         WHERE symbol = $1 AND timestamp >= $2
+        ORDER BY timestamp ASC
     """
     rows = await conn.fetch(query, ticker, start_timestamp)
     data_points = []
@@ -500,7 +522,7 @@ def plot_chart(data, symbol):
 
 
 async def read_data(symbol, start_timestamp, plot=False):
-    print("Reading data from the database...")
+    print(f"Reading data after {start_timestamp.isoformat()} from the database...")
     # Load data from the database
     # bar_size = 500000
     # bar_size = 1000000
@@ -514,7 +536,6 @@ async def read_data(symbol, start_timestamp, plot=False):
     # print(dollar_bars.tail())
     # add_features(dollar_bars)
 
-
     # plot_chart(dollar_bars, symbol)
 
     dib_bars = create_dollar_imbalance_bars(data, imablance_theta)
@@ -527,14 +548,15 @@ async def read_data(symbol, start_timestamp, plot=False):
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "record":
-        asyncio.run(main())
-    help_strings = ['help', '-h', '--help', '-help']
-    if len(sys.argv) > 1 and sys.argv[1] in help_strings:
-        print("Usage: python dashtrade.py [record] [symbol] [plot]")
-        print("Example: python dashtrade.py record")
-        print("Example: python dashtrade.py read BTC/USD")
-        print("Example: python dashtrade.py read BTC/USD plot")
-    else:
+        options = [False, False]
+        if 'trades' in sys.argv:
+            options[0] = True
+        if 'orderbook' in sys.argv:
+            options[1] = True
+
+        asyncio.run(main(*options))
+
+    elif 'read' in sys.argv:
         symbol = "BTC/USD"
         plot = False
         if 'plot' in sys.argv:
@@ -546,3 +568,9 @@ if __name__ == "__main__":
                 symbol = sys.argv[2]
 
         asyncio.run(read_data(symbol, datetime.datetime(2024, 11, 24), plot=plot))
+
+    else:
+        print("Usage: python dashtrade.py [record] [symbol] [plot]")
+        print("Example: python dashtrade.py record")
+        print("Example: python dashtrade.py read BTC/USD")
+        print("Example: python dashtrade.py read BTC/USD plot")

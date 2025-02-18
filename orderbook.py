@@ -7,7 +7,7 @@ import asyncpg
 from datetime import datetime
 
 async def get_orderbook(symbol: str, count: int = 500) -> dict:
-    endpoint = 'https://api.kraken.com/0/public/' + '/Depth' + f'?pair={symbol}&count={count}'
+    endpoint = 'https://api.kraken.com/0/public/' + '/Depth' + f'?pair={symbol.replace('/','')}&count={count}'
     payload = {}
     headers = {'Accept': 'application/json'}
 
@@ -23,14 +23,13 @@ async def get_orderbook(symbol: str, count: int = 500) -> dict:
             response_json['result']['symbol'] = symbol
             return response_json['result']
 
-def format_orderbook(orderbook: dict) -> dict:
+async def format_orderbook(orderbook: dict) -> dict:
     xz_symbol = list(orderbook.keys())[0]
     symbol = orderbook['symbol']
     bids = orderbook[xz_symbol]['bids']
     asks = orderbook[xz_symbol]['asks']
     # bids and asks are lists of lists: [[pricestr, volumestr, timestampint], ...]
     # we want to convert the strings to floats and the timestamp to a datetime object
-
     for bid in bids:
         bid[0] = float(bid[0])
         bid[1] = float(bid[1])
@@ -44,33 +43,74 @@ def format_orderbook(orderbook: dict) -> dict:
 
     return orderbook
 
-async def push_orderbook(orderbook: dict, conn):
-    # Create the orderbook table (if it doesn't exist) using Postgres syntax
+async def push_orderbook(orderbook: dict, conn: asyncpg.Connection):
+    # Extract the symbol. Our orderbook is structured as:
     # schema is {symbol: {bids: [[price (float), volume (float), timestamp (timestamp)], ...], asks: [[price (float), volume (float), timestamp (datetime)], ...]}}
+    # { symbol: { bids: [...], asks: [...] } }
+    symbol = list(orderbook.keys())[0]
+    bids = orderbook[symbol]['bids']
+    asks = orderbook[symbol]['asks']
 
-    pass
+    # Set the snapshot time to now (or use a provided timestamp)
+    snapshot_time = datetime.now()
+
+    # Prepare a list of tuples to insert.
+    # Each tuple: (symbol, side, price, volume, order_time, snapshot_time)
+    entries = []
+    for bid in bids:
+        price, volume, order_time = bid
+        entries.append((symbol, 'bid', price, volume, order_time, snapshot_time))
+    for ask in asks:
+        price, volume, order_time = ask
+        entries.append((symbol, 'ask', price, volume, order_time, snapshot_time))
+
+    # Create the table if it doesn't exist.
+    await conn.execute('''
+            CREATE TABLE IF NOT EXISTS orderbook_entries (
+                id SERIAL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price DOUBLE PRECISION NOT NULL,
+                volume DOUBLE PRECISION NOT NULL,
+                order_time TIMESTAMP NOT NULL,
+                snapshot_time TIMESTAMP NOT NULL
+            )
+    ''')
+
+    # Insert the entries using executemany for bulk insert.
+    await conn.executemany('''
+            INSERT INTO orderbook_entries(symbol, side, price, volume, order_time, snapshot_time)
+            VALUES($1, $2, $3, $4, $5, $6)
+    ''', entries)
 
 
-async def listen_to_orderbooks(pairs, conn, shutdown_event):
-    time_start = time.time()
+async def listen_to_orderbooks(pairs: list, pool: asyncpg.Pool, shutdown_event):
+    recording_frequency = 30
+
     tasks = []
-    async def get_and_push_orderbook(pair: str):
+    async def get_and_push_orderbook(pair: str, pool: asyncpg.Pool):
         orderbook = await get_orderbook(pair)
-        orderbook = format_orderbook(orderbook)
-        # saved = await push_orderbook(orderbook, conn)
+        orderbook = await format_orderbook(orderbook)
+        async with pool.acquire() as conn:
+            await push_orderbook(orderbook, conn)
         return orderbook
-    # try:
-    # while not shutdown_event.is_set():
+
+    print(f'Waiting {round(recording_frequency - time.time() % recording_frequency,2)} seconds to start orderbook recording')
+    await asyncio.sleep(recording_frequency - time.time() % recording_frequency)
     runtime = time.time()
-    for pair in pairs:
-        pair = pair.replace('/', '')
-        tasks.append(asyncio.create_task(get_and_push_orderbook(pair)))
+    try:
+        while not shutdown_event.is_set():
+            for pair in pairs:
+                tasks.append(asyncio.create_task(get_and_push_orderbook(pair, pool)))
 
-    orderbooks = await asyncio.gather(*tasks)
+            orderbooks = await asyncio.gather(*tasks)
 
-    runtime += 10
-    # time_until_next_run = runtime - time.time()
-    # asycnio.sleep(time_until_next_run)
-
-    time_end = time.time()
-    print(f'Time elapsed: {round(time_end - time_start,2)}')
+            runtime += recording_frequency
+            time_until_next_run = runtime - time.time()
+            # Clear the tasks list
+            tasks = []
+            await asyncio.sleep((time_until_next_run / 3))
+            # Interrupt the sleep to allow for a restart within the frequency
+            await asyncio.sleep(runtime - time.time())
+    except Exception as e:
+        logging.error(f'Error in listen_to_orderbooks: {e}')
