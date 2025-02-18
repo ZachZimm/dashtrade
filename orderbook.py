@@ -89,11 +89,15 @@ async def listen_to_orderbooks(pairs: list, pool: asyncpg.Pool, shutdown_event):
 
     tasks = []
     async def get_and_push_orderbook(pair: str, pool: asyncpg.Pool):
-        orderbook = await get_orderbook(pair)
-        orderbook = await format_orderbook(orderbook)
-        async with pool.acquire() as conn:
-            await push_orderbook(orderbook, conn)
-        return orderbook
+        try:
+            orderbook = await get_orderbook(pair)
+            orderbook = await format_orderbook(orderbook)
+            async with pool.acquire() as conn:
+                await push_orderbook(orderbook, conn)
+            return orderbook
+        except Exception as e:
+            logging.error(f'Error in get_and_push_orderbook: {e}')
+            return {}
 
     print(f'Waiting {round(recording_frequency - time.time() % recording_frequency,2)} seconds to start orderbook recording')
     await asyncio.sleep(recording_frequency - time.time() % recording_frequency)
@@ -107,7 +111,6 @@ async def listen_to_orderbooks(pairs: list, pool: asyncpg.Pool, shutdown_event):
 
             runtime += recording_frequency
             time_until_next_run = runtime - time.time()
-            # Clear the tasks list
             tasks = []
             await asyncio.sleep((time_until_next_run / 3))
             # Interrupt the sleep to allow for a restart within the frequency
