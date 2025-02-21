@@ -9,3 +9,4 @@ mplfinance
 asyncpg
 aiosqlite
 aiohttp
+tqdm
