@@ -4,6 +4,7 @@ websockets
 pydantic
 pandas
 numpy
+plotly
 matplotlib
 mplfinance
 asyncpg

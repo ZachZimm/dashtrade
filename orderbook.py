@@ -85,7 +85,7 @@ async def push_orderbook(orderbook: dict, conn: asyncpg.Connection):
 
 
 async def listen_to_orderbooks(pairs: list, pool: asyncpg.Pool, shutdown_event):
-    recording_frequency = 30
+    recording_frequency = 15
 
     tasks = []
     async def get_and_push_orderbook(pair: str, pool: asyncpg.Pool):
