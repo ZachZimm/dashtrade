@@ -166,6 +166,9 @@ async def main(loop=False):
                 sleep_time = sleep_hours * 60 * 60
                 next_run = start_time + sleep_time
                 time_to_sleep = next_run - time.time() # Prevents drift
+                time_to_sleep_hours = time_to_sleep / 60 / 60
+                print(f"Sleeping for {time_to_sleep_hours:.2f} hours...\n")
+                time_to_sleep = next_run - time.time()
                 await asyncio.sleep(time_to_sleep)
 
     except KeyboardInterrupt:
