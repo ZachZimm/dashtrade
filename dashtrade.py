@@ -42,7 +42,7 @@ def read_balances(data):
 
     return total_balance
 
-pairs = ["XRP/USD", "XRP/BTC", "ETH/USD", "ETH/BTC", "BTC/USD", "ADA/USD", "SOL/USD", "SOL/BTC", "DOGE/USD", "JUP/USD", "FARTCOIN/USD", "TAO/USD"]
+pairs = ["XRP/USD", "XRP/BTC", "ETH/USD", "ETH/BTC", "BTC/USD", "ADA/USD", "SOL/USD", "SOL/BTC", "DOGE/USD", "JUP/USD", "FARTCOIN/USD", "TAO/USD", "MKR/USD"]
 
 subscribe_data = {
     "method": "subscribe",

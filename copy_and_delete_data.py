@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import time
+import datetime
 import os
 import asyncpg
 from dotenv import load_dotenv
@@ -119,6 +120,7 @@ async def main(loop=False):
     dest_dsn = f"postgresql://{DEST_USER}:{DEST_PASS}@{DEST_HOST}:{DEST_PORT}/{DEST_DB_NAME}"
     try:
         while True:
+            run_start_time = time.time()
             # Instead of using one connection for both tables, open separate connections.
             print("Connecting to source database for 'trades'...")
             trades_src_conn = await asyncpg.connect(src_dsn)
@@ -164,12 +166,15 @@ async def main(loop=False):
                 break
             if loop:
                 sleep_time = sleep_hours * 60 * 60
-                next_run = start_time + sleep_time
+                next_run = run_start_time + sleep_time
                 time_to_sleep = next_run - time.time() # Prevents drift
                 time_to_sleep_hours = time_to_sleep / 60 / 60
-                print(f"Sleeping for {time_to_sleep_hours:.2f} hours...\n")
+                print(f"Sleeping for {time_to_sleep_hours:.2f} hours...")
+                wake_datetime = datetime.datetime.fromtimestamp(next_run)
+                print(f"Next run scheduled for: {wake_datetime}\n")
                 time_to_sleep = next_run - time.time()
-                await asyncio.sleep(time_to_sleep)
+                if time_to_sleep > 0:
+                    await asyncio.sleep(time_to_sleep)
 
     except KeyboardInterrupt:
         print("Shutting down...")
