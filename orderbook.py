@@ -7,21 +7,30 @@ import asyncpg
 from datetime import datetime
 
 async def get_orderbook(symbol: str, count: int = 500) -> dict:
-    endpoint = 'https://api.kraken.com/0/public/' + '/Depth' + f'?pair={symbol.replace('/','')}&count={count}'
+    endpoint = 'https://api.kraken.com/0/public/Depth' + f'?pair={symbol.replace("/","")}&count={count}'
     payload = {}
     headers = {'Accept': 'application/json'}
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(endpoint, headers=headers, data=payload) as response:
-            if response.status != 200:
-                logging.error(f'Error getting orderbook: {await response.json()}')
-                return {}
-            response_json = await response.json()
-            if response_json['error'] != []:
-                logging.error(f'Error getting orderbook: {response_json["error"]}')
-                return {}
-            response_json['result']['symbol'] = symbol
-            return response_json['result']
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(endpoint, headers=headers, data=payload, timeout=10) as response:
+                if response.status != 200:
+                    logging.warning(f'HTTP {response.status} when getting orderbook for {symbol}: {await response.text()}')
+                    return {'error': f'HTTP {response.status}', 'symbol': symbol}
+
+                response_json = await response.json()
+                if response_json['error']:
+                    logging.warning(f'API error getting orderbook for {symbol}: {response_json["error"]}')
+                    return {'error': response_json['error'], 'symbol': symbol}
+
+                response_json['result']['symbol'] = symbol
+                return response_json['result']
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logging.warning(f'Network error getting orderbook for {symbol}: {str(e)}')
+        return {'error': str(e), 'symbol': symbol}
+    except Exception as e:
+        logging.error(f'Unexpected error getting orderbook for {symbol}: {str(e)}')
+        return {'error': str(e), 'symbol': symbol}
 
 async def format_orderbook(orderbook: dict) -> dict:
     xz_symbol = list(orderbook.keys())[0]
@@ -86,34 +95,65 @@ async def push_orderbook(orderbook: dict, conn: asyncpg.Connection):
 
 async def listen_to_orderbooks(pairs: list, pool: asyncpg.Pool, shutdown_event):
     recording_frequency = 15
+    # Track pairs that repeatedly fail
+    problem_pairs = {}
 
-    tasks = []
     async def get_and_push_orderbook(pair: str, pool: asyncpg.Pool):
         try:
             orderbook = await get_orderbook(pair)
+            if 'error' in orderbook:
+                # Count consecutive failures
+                # problem_pairs[pair] = problem_pairs.get(pair, 0) + 1
+                return {'error': orderbook['error'], 'symbol': pair}
+
+            # Reset failure count on success
+            if pair in problem_pairs:
+                problem_pairs[pair] = 0
+
             orderbook = await format_orderbook(orderbook)
             async with pool.acquire() as conn:
                 await push_orderbook(orderbook, conn)
             return orderbook
         except Exception as e:
-            logging.error(f'Error in get_and_push_orderbook: {e}')
-            return {}
+            logging.error(f'Error in get_and_push_orderbook for {pair}: {e}')
+            problem_pairs[pair] = problem_pairs.get(pair, 0) + 1
+            return {'error': str(e), 'symbol': pair}
 
     print(f'Waiting {round(recording_frequency - time.time() % recording_frequency,2)} seconds to start orderbook recording')
     await asyncio.sleep(recording_frequency - time.time() % recording_frequency)
     runtime = time.time()
-    try:
-        while not shutdown_event.is_set():
-            for pair in pairs:
-                tasks.append(asyncio.create_task(get_and_push_orderbook(pair, pool)))
 
-            orderbooks = await asyncio.gather(*tasks)
+    while not shutdown_event.is_set():
+        active_pairs = [p for p in pairs if problem_pairs.get(p, 0) < 5]
+        removed_pairs = [p for p in pairs if problem_pairs.get(p, 0) >= 5]
 
-            runtime += recording_frequency
-            time_until_next_run = runtime - time.time()
-            tasks = []
-            await asyncio.sleep((time_until_next_run / 3))
-            # Interrupt the sleep to allow for a restart within the frequency
-            await asyncio.sleep(runtime - time.time())
-    except Exception as e:
-        logging.error(f'Error in listen_to_orderbooks: {e}')
+        if removed_pairs:
+            logging.warning(f"Temporarily skipping problematic pairs: {removed_pairs}")
+
+        tasks = []
+        for pair in active_pairs:
+            tasks.append(asyncio.create_task(get_and_push_orderbook(pair, pool)))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Log any errors from the gather
+        for result in results:
+            if isinstance(result, Exception):
+                logging.error(f"Task exception: {result}")
+
+        # Reduce failure counts over time to eventually retry problematic pairs
+        for pair in list(problem_pairs.keys()):
+            if problem_pairs[pair] > 0:
+                problem_pairs[pair] -= 0.2  # Slowly reduce the error count
+
+        runtime += recording_frequency
+        time_until_next_run = runtime - time.time()
+
+        # Ensure we don't sleep for negative time
+        if time_until_next_run > 0:
+            await asyncio.sleep(time_until_next_run)
+        else:
+            # If we're behind schedule, reset the runtime clock
+            logging.warning(f"Recording cycle took longer than {recording_frequency}s, resetting schedule")
+            runtime = time.time() + recording_frequency
+            await asyncio.sleep(1)  # Brief pause before next cycle
