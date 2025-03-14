@@ -1,12 +1,15 @@
+import os
 import asyncio
 import asyncpg
+from dotenv import load_dotenv
 
+load_dotenv()  # Load DB connection settings from .env file
 # Change these to match your DEST DB connection settings.
-DB_HOST = "localhost"
-DB_PORT = 5432
-DB_NAME = "dest_db"
-DB_USER = "postgres"
-DB_PASS = "password"
+DB_HOST = os.getenv("DEST_DB_HOST")
+DB_PORT = os.getenv("DEST_DB_PORT")
+DB_NAME = os.getenv("DEST_DB_NAME")
+DB_USER = os.getenv("DEST_DB_USER")
+DB_PASS = os.getenv("DEST_DB_PASS")
 
 async def find_and_delete_duplicates(table_name: str, conn: asyncpg.Connection):
     """
