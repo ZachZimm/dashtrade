@@ -76,7 +76,7 @@ async def push_orderbook(orderbook: dict, conn: asyncpg.Connection):
     # Create the table if it doesn't exist.
     await conn.execute('''
             CREATE TABLE IF NOT EXISTS orderbook_entries (
-                id SERIAL PRIMARY KEY,
+                id BIGSERIAL PRIMARY KEY,
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL,
                 price DOUBLE PRECISION NOT NULL,

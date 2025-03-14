@@ -103,7 +103,7 @@ async def connect() -> asyncpg.Pool:
     async with pool.acquire() as conn:
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS trades (
-                id SERIAL PRIMARY KEY,
+                id BIGSERIAL PRIMARY KEY,
                 symbol TEXT,
                 side TEXT,
                 qty REAL,
